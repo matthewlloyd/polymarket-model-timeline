@@ -1,0 +1,101 @@
+name: Refresh and deploy dashboard
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - data/discovery-state.json
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Run tests
+        run: python -m unittest -v
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v6
+
+      - name: Determine public URL
+        id: public-url
+        shell: bash
+        env:
+          SITE_URL_OVERRIDE: ${{ vars.SITE_URL }}
+        run: |
+          repository_name="${GITHUB_REPOSITORY#*/}"
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          if [[ -n "$SITE_URL_OVERRIDE" ]]; then
+            site_url="${SITE_URL_OVERRIDE%/}/"
+          elif [[ "${repository_name,,}" == "${owner}.github.io" ]]; then
+            site_url="https://${owner}.github.io/"
+          else
+            site_url="https://${owner}.github.io/${repository_name}/"
+          fi
+          echo "url=$site_url" >> "$GITHUB_OUTPUT"
+
+      - name: Build static dashboard
+        shell: bash
+        run: |
+          mkdir -p _site
+          python polymarket_model_timeline.py \
+            --html \
+            --history-days 30 \
+            --state-file data/discovery-state.json \
+            --site-url "${{ steps.public-url.outputs.url }}" \
+            --source-url "${{ github.server_url }}/${{ github.repository }}" \
+            > _site/index.html.tmp
+          test -s _site/index.html.tmp
+          grep -q '</html>' _site/index.html.tmp
+          mv _site/index.html.tmp _site/index.html
+          cp public/robots.txt _site/robots.txt
+          touch _site/.nojekyll
+
+      - name: Upload GitHub Pages artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site
+
+      - name: Persist discovery state
+        continue-on-error: true
+        shell: bash
+        run: |
+          if [[ -z "$(git status --porcelain -- data/discovery-state.json)" ]]; then
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/discovery-state.json
+          git commit -m "Update Polymarket discovery state [skip ci]"
+          git push
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5
